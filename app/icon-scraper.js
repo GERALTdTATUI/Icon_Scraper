@@ -134,7 +134,7 @@ export async function getBestIcon(targetUrl, params, timeout = 8000) {
     if (cfg.try_path_guessing) for (let path of ICON_PATHS) {
       let fallbackUrl = new URL(path, response.url).href;
       let headRes = await fetch(fallbackUrl, {
-        method: 'HEAD',
+        method: 'GET',
         signal: controller.signal
       });
 
