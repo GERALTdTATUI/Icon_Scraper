@@ -57,6 +57,25 @@ const icon_scraper_apis = [
   'https://icons.duckduckgo.com/ip3/<domain>.ico'
 ];
 
+function print_request_details(domain, params) {
+  console.log("======================================+++======================================")
+  
+  console.log(`Searching icon for domain: ${domain}, using:
+    Search rejection for donwned hosts: ${params.reject_search_downed_domains ? "YES" : "NO"};
+    Path guessing when no icons found normally: ${params.try_path_guessing ? "YES" : "NO"};
+    Using external APIs as fallback: ${params.use_external_apis ? "YES" : "NO"};
+  `);
+}
+
+function send_status(status, type, url, result) {
+  switch(status) {
+    case "success": console.log(`Icon found through ${type}, redirecting to: ${result}`); break;
+    case "error": console.log("Scraper couldn't find any icon: " + url); break;
+    default: console.log("Fuction not supported")
+  }
+  console.log("===============================================================================")
+  return result
+}
 
 function compare_request_params(array) {
   const full_config = {...array}
@@ -87,77 +106,137 @@ function getScore(sizes, type) {
  * @param {number} [timeout=8000] - Tempo limite em ms.
  * @returns {Promise<string|null>}
  */
-export async function getBestIcon(targetUrl, params, timeout = 8000) {
-  if (!targetUrl || typeof targetUrl !== 'string') return null;
 
-  const cfg = compare_request_params(params); console.log(cfg)
+export async function getBestIcon(targetUrl, params = {}, timeout = 8000) {
+  if (!targetUrl || typeof targetUrl !== 'string')
+    return send_status("error", null, targetUrl, null);
+
+  const cfg = compare_request_params(params);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
+  const normalizedUrl = /^https?:\/\//i.test(targetUrl)
+    ? targetUrl
+    : `https://${targetUrl}`;
+
+  let baseUrl = normalizedUrl;
+
+  print_request_details(normalizedUrl, cfg);
+
   try {
-    const normalizedUrl = /^https?:\/\//i.test(targetUrl) ? targetUrl : `https://${targetUrl}`;
-    
-    const response = await fetch(normalizedUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      signal: controller.signal
-    });
+    // Tentativa de scraping convencional
+    try {
+      const response = await fetch(normalizedUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        signal: controller.signal
+      });
 
-    if (!response.ok && cfg.reject_search_downed_domains) return null;
-    else if (response.ok) {
-      const html = await response.text();
-      const $ = cheerio.load(html);
-      let bestIcon = { url: null, score: -1 };
+      // Atualiza a URL caso tenha ocorrido redirecionamento
+      if (response.url) baseUrl = response.url;
 
-      $(SELECTORS.join(', ')).each((_, el) => {
-        const href = $(el).attr('href')?.trim();
-        if (!href) return;
+      if (response.ok) {
+        const html = await response.text();
+        const $ = cheerio.load(html);
+        let bestIcon = { url: null, score: -1 };
 
-        try {
-          const absoluteUrl = new URL(href, response.url).href;
-          const score = getScore($(el).attr('sizes'), $(el).attr('type'));
+        $(SELECTORS.join(', ')).each((_, el) => {
+          const href = $(el).attr('href')?.trim();
+          if (!href) return;
 
-          if (score > bestIcon.score) {
-            bestIcon = { url: absoluteUrl, score };
+          try {
+            const absoluteUrl = new URL(href, baseUrl).href;
+            const score = getScore(
+              $(el).attr('sizes'),
+              $(el).attr('type')
+            );
+
+            if (score > bestIcon.score) {
+              bestIcon = { url: absoluteUrl, score };
+            }
+          } catch {
+            // Ignora URLs inválidas e continua procurando
           }
-        } catch {
-          return null
+        });
+
+        if (bestIcon.url) {
+          return send_status(
+            "success",
+            "normal scraping",
+            normalizedUrl,
+            bestIcon.url
+          );
         }
-      });
+      }
 
-      if (bestIcon.url) return bestIcon.url;
+    } catch (e) {
+      console.warn(`Normal scraping failed: ${e.message}`);
     }
 
+    if (cfg.reject_search_downed_domains)
+      return send_status(
+        "error",
+        null,
+        normalizedUrl,
+        new Error("Host down, fetching canceled due to 'Search rejection for donwned hosts' option")
+      );
 
-    // Fallback1: verifica se existe /favicon.ico em algum caminho catalogado
-    if (cfg.try_path_guessing) for (let path of ICON_PATHS) {
-      let fallbackUrl = new URL(path, response.url).href;
-      let headRes = await fetch(fallbackUrl, {
-        method: 'GET',
-        signal: controller.signal
-      });
+    // Fallback 1: Path guessing
+    if (cfg.try_path_guessing) {
+      for (const path of ICON_PATHS) {
+        try {
+          const fallbackUrl = new URL(path, baseUrl).href;
 
-      if (headRes.ok) return fallbackUrl;
+          const headRes = await fetch(fallbackUrl, {
+            method: 'GET',
+            signal: controller.signal
+          });
+
+          if (headRes.ok) {
+            return send_status(
+              "success",
+              "path guessing",
+              normalizedUrl,
+              fallbackUrl
+            );
+          }
+        } catch (e) {
+          console.warn(`Path guessing failed (${ICON_PATHS.indexOf(path) + 1}): ${e.message}`);
+        }
+      }
     }
 
-    // Fallback2: utiliza uma api external em busca de um match ou placeholder
-    if (cfg.use_external_apis) for (let api of icon_scraper_apis) {
-      let fallbackUrl = api.replace("<domain>", normalizedUrl)
-      let headRes = await fetch(fallbackUrl, {
-        method: 'HEAD',
-        signal: controller.signal
-      });
+    // Fallback 2: External APIs
+    if (cfg.use_external_apis) {
+      for (const api of icon_scraper_apis) {
+        try {
+          const fallbackUrl = api.replace("<domain>", new URL(baseUrl).hostname);
 
-      if (headRes.ok) return fallbackUrl;
+          const headRes = await fetch(fallbackUrl, {
+            method: 'HEAD',
+            signal: controller.signal
+          });
+
+          if (headRes.ok) {
+            return send_status(
+              "success",
+              "external api",
+              normalizedUrl,
+              fallbackUrl
+            );
+          }
+        } catch (e) {
+          console.warn(`External API failed (${icon_scraper_apis.indexOf(api) + 1}): ${e.message}`);
+        }
+      }
     }
 
-    return null;
-  } catch {
-    return null;
+    return send_status("error", null, normalizedUrl, new Error("Enable to fetch icons from host (offline?) and the domain is invalid for the external APIs"));
   } finally {
     clearTimeout(timer);
   }
 }
+
 
 export default getBestIcon;

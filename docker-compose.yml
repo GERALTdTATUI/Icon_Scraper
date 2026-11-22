@@ -1,10 +1,10 @@
 version: "3"
 services:
   node:
-    build: .
-    command: "npm run start"
-    working_dir: /home/node/app
+    image: geraltdtatui/icon_scraper:latest
+    restart: always
     environment:
+      # - NODE_TLS_REJECT_UNAUTHORIZED=0 # Used to fetch non HTTPS links (eg. http:10.19.0.1) Use it with caution!!
       - NODE_ENV=production
     expose:
       - "3000"
